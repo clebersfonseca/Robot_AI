@@ -17,6 +17,10 @@ O sistema comunica-se diretamente com as APIs do **Google Gemini** (`gemini-3.5-
 - **Interação Natural por Toque (*Hold-to-Talk*)**:
   - Segure o dedo em qualquer ponto da tela AMOLED para falar.
   - Ao soltar, o dispositivo envia o áudio, aguarda a resposta do modelo e sintetiza a fala com animação correspondente.
+- **Memória Persistente Autônoma (NVS Flash)**:
+  - O robô possui memória de longo prazo persistente na Flash do ESP32-S3 (não se perde ao desligar ou reiniciar).
+  - Ele detecta e extrai automaticamente informações importantes sobre você (como seu nome, gostos, cidade, rotina ou preferências) e as salva na NVS.
+  - Em todas as conversas seguintes, essas memórias são injetadas no contexto do Gemini, permitindo que ele se lembre de você e responda de forma personalizada.
 - **Avatar Robô Animado (LVGL 8.4)**:
   - Renderizado em canvas de alta velocidade via interface Quad-SPI DMA a 40 MHz no painel AMOLED **CO5300** (`480x480`).
   - Estados visuais em tempo real: **Repouso** (piscando, olhando ao redor e acenando), **Ouvindo** (ondas de áudio e olhos arregalados), **Pensando** (engrenagens girando e mão no queixo) e **Falando** (boca sincronizada e notas musicais).

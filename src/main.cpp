@@ -235,6 +235,78 @@ static SemaphoreHandle_t wifi_mtx = NULL;
 static Preferences prefs;
 static volatile int ai_volume = 80; // Volume de 0 a 100% (padrão 80%)
 
+// -----------------------------------------------------------------------------
+// Memória Persistente do Agente (fatos, preferências e perfil do usuário na NVS)
+// -----------------------------------------------------------------------------
+#define MAX_MEM_FACTS 10
+#define MAX_MEM_LEN   120
+static String ai_memories[MAX_MEM_FACTS];
+static int ai_memories_count = 0;
+
+static void mem_load() {
+    ai_memories_count = 0;
+    int total = prefs.getInt("mem_count", 0);
+    total = constrain(total, 0, MAX_MEM_FACTS);
+    for (int i = 0; i < total; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "mem_%d", i);
+        String fact = prefs.getString(key, "");
+        if (fact.length() > 0) {
+            ai_memories[ai_memories_count++] = fact;
+        }
+    }
+    Serial.printf("[MEM] %d fatos carregados da memoria Flash (NVS)\n", ai_memories_count);
+    for (int i = 0; i < ai_memories_count; i++) {
+        Serial.printf("  - %s\n", ai_memories[i].c_str());
+    }
+}
+
+static void mem_save() {
+    prefs.putInt("mem_count", ai_memories_count);
+    for (int i = 0; i < ai_memories_count; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "mem_%d", i);
+        prefs.putString(key, ai_memories[i]);
+    }
+}
+
+static void mem_learn(const char *fact) {
+    if (!fact || !strlen(fact)) return;
+    String new_fact = String(fact);
+    new_fact.trim();
+    if (new_fact.length() < 3) return;
+
+    // Se já existir fato igual ou muito parecido, ignora para não duplicar
+    for (int i = 0; i < ai_memories_count; i++) {
+        if (ai_memories[i].equalsIgnoreCase(new_fact)) return;
+    }
+
+    if (ai_memories_count < MAX_MEM_FACTS) {
+        ai_memories[ai_memories_count++] = new_fact;
+    } else {
+        // Rotaciona: descarta a memória mais antiga e adiciona a nova no final
+        for (int i = 0; i < MAX_MEM_FACTS - 1; i++) {
+            ai_memories[i] = ai_memories[i + 1];
+        }
+        ai_memories[MAX_MEM_FACTS - 1] = new_fact;
+    }
+    mem_save();
+    Serial.printf("[MEM] Nova memoria aprendida e salva na Flash: \"%s\"\n", new_fact.c_str());
+}
+
+static String mem_build_prompt() {
+    if (ai_memories_count == 0) {
+        return "Nenhuma memoria anterior ainda.";
+    }
+    String s = "";
+    for (int i = 0; i < ai_memories_count; i++) {
+        s += "- ";
+        s += ai_memories[i];
+        if (i < ai_memories_count - 1) s += "\\n";
+    }
+    return s;
+}
+
 enum { AI_IDLE = 0, AI_LISTENING, AI_THINKING, AI_SPEAKING, AI_DONE };
 static volatile int ai_state = AI_IDLE;
 static volatile bool ai_rec = false;
@@ -542,16 +614,24 @@ static void ai_play_pcm24(const int16_t *in, size_t n) {
 }
 
 static void ai_query(int16_t *pcm, size_t n) {
-    static const char prefix[] =
-        "{\"contents\":[{\"parts\":[{\"text\":\"Voce e um assistente de voz em um relogio de mesa. "
+    // Monta o prompt do sistema injetando dinamicamente as memórias salvas na Flash
+    String prompt_text =
+        "Voce e um robo assistente de voz inteligente em um display de mesa com memoria persistente. "
         "Responda em portugues do Brasil ao que foi dito no audio, em no maximo 3 frases curtas "
-        "(ate 160 caracteres), sem markdown e sem emojis.\"},{\"inline_data\":{\"mime_type\":\"audio/wav\",\"data\":\"";
+        "(ate 160 caracteres), sem markdown e sem emojis.\\n\\n"
+        "[FATOS QUE VOCE LEMBRA SOBRE O USUARIO/AMBIENTE]:\\n" + mem_build_prompt() + "\\n\\n"
+        "SE a mensagem do usuario trouxer algum fato novo importante (como nome dele, gostos, rotina, cidade ou fatos para lembrar), "
+        "ao final da sua resposta, em uma linha separada, adicione exatamente:\\n"
+        "MEMORIA: <fato curto e claro a ser salvo>\\n"
+        "(Exemplo: MEMORIA: O nome do usuario e Cleber)";
+
+    String prefix = "{\"contents\":[{\"parts\":[{\"text\":\"" + prompt_text + "\"},{\"inline_data\":{\"mime_type\":\"audio/wav\",\"data\":\"";
     static const char suffix[] = "\"}}]}]}";
 
     size_t wav_len = 44 + n * 2;
     uint8_t *wav = (uint8_t *)heap_caps_malloc(wav_len, MALLOC_CAP_SPIRAM);
     size_t b64_cap = 4 * ((wav_len + 2) / 3) + 1;
-    size_t body_cap = sizeof(prefix) + b64_cap + sizeof(suffix);
+    size_t body_cap = prefix.length() + b64_cap + sizeof(suffix) + 32;
     char *body = (char *)heap_caps_malloc(body_cap, MALLOC_CAP_SPIRAM);
     if (!wav || !body) {
         free(wav);
@@ -573,8 +653,8 @@ static void ai_query(int16_t *pcm, size_t n) {
     ai_put_le(wav + 40, n * 2, 4);
     memcpy(wav + 44, pcm, n * 2);
 
-    size_t pl = strlen(prefix), olen = 0;
-    memcpy(body, prefix, pl);
+    size_t pl = prefix.length(), olen = 0;
+    memcpy(body, prefix.c_str(), pl);
     mbedtls_base64_encode((uint8_t *)body + pl, b64_cap, &olen, wav, wav_len);
     memcpy(body + pl + olen, suffix, sizeof(suffix));
     size_t body_len = pl + olen + sizeof(suffix) - 1;
@@ -635,20 +715,41 @@ static void ai_query(int16_t *pcm, size_t n) {
     }
     Serial.printf("[AI] HTTP %d: %s\n", code, raw);
 
+    // Se o modelo aprendeu e enviou uma tag "MEMORIA:", extrai e salva na Flash NVS
+    char speech_text[1024];
+    strlcpy(speech_text, raw, sizeof(speech_text));
+    char *mem_tag = strstr(speech_text, "MEMORIA:");
+    if (!mem_tag) mem_tag = strstr(speech_text, "memoria:");
+    if (mem_tag) {
+        char *fact_str = mem_tag + 8;
+        while (*fact_str == ' ' || *fact_str == '\t') fact_str++;
+        // Corta na quebra de linha seguinte
+        char *nl = strchr(fact_str, '\n');
+        if (nl) *nl = 0;
+        mem_learn(fact_str);
+        // Remove a linha da tag MEMORIA do áudio que o robô vai falar e do balão na tela
+        *mem_tag = 0;
+        // Limpa espaços ou quebras extras no fim da fala
+        int sl = strlen(speech_text);
+        while (sl > 0 && (speech_text[sl - 1] == ' ' || speech_text[sl - 1] == '\n' || speech_text[sl - 1] == '\r')) {
+            speech_text[--sl] = 0;
+        }
+    }
+
     size_t tts_bytes = 0;
-    uint8_t *tts = ok ? ai_tts_fetch(raw, &tts_bytes) : NULL;
+    uint8_t *tts = ok ? ai_tts_fetch(speech_text, &tts_bytes) : NULL;
     ai_wifi_down();
     xSemaphoreGive(wifi_mtx);
 
     if (tts) {
-        to_ascii(raw, out, sizeof(out));
+        to_ascii(speech_text, out, sizeof(out));
         ai_set(AI_SPEAKING, out);
         ai_play_pcm24((int16_t *)tts, tts_bytes / 2);
         memset(tts, 0, tts_bytes); // Limpeza segura do áudio sintetizado na PSRAM
         free(tts);
         ai_set(AI_DONE, out);
     } else {
-        to_ascii(raw, out, sizeof(out));
+        to_ascii(speech_text, out, sizeof(out));
         ai_set(AI_DONE, out);
     }
 }
@@ -1253,6 +1354,7 @@ void setup() {
     init_touch();
     wifi_mtx = xSemaphoreCreateMutex();
     init_volume_buttons();
+    mem_load(); // Carrega os fatos aprendidos salvos na Flash NVS
     init_audio();
     xTaskCreatePinnedToCore(ai_task, "AI_Task", 20480, NULL, 1, &ai_task_handle, 0);
 
