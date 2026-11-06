@@ -619,11 +619,11 @@ static void ai_query(int16_t *pcm, size_t n) {
         "Voce e um robo assistente de voz inteligente em um display de mesa com memoria persistente. "
         "Responda em portugues do Brasil ao que foi dito no audio, em no maximo 3 frases curtas "
         "(ate 160 caracteres), sem markdown e sem emojis.\\n\\n"
-        "[FATOS QUE VOCE LEMBRA SOBRE O USUARIO/AMBIENTE]:\\n" + mem_build_prompt() + "\\n\\n"
-        "SE a mensagem do usuario trouxer algum fato novo importante (como nome dele, gostos, rotina, cidade ou fatos para lembrar), "
+        "[FATOS QUE VOCE LEMBRA (SEU NOME, DO USUARIO, PREFERENCIAS E AMBIENTE)]:\\n" + mem_build_prompt() + "\\n\\n"
+        "SE a mensagem do usuario trouxer algum fato novo importante (como seu nome proprio de robo, o nome dele, gostos, rotina, cidade ou algo para lembrar), "
         "ao final da sua resposta, em uma linha separada, adicione exatamente:\\n"
         "MEMORIA: <fato curto e claro a ser salvo>\\n"
-        "(Exemplo: MEMORIA: O nome do usuario e Cleber)";
+        "(Exemplos: MEMORIA: O meu nome e robotAI | MEMORIA: O nome do usuario e Cleber)";
 
     String prefix = "{\"contents\":[{\"parts\":[{\"text\":\"" + prompt_text + "\"},{\"inline_data\":{\"mime_type\":\"audio/wav\",\"data\":\"";
     static const char suffix[] = "\"}}]}]}";
