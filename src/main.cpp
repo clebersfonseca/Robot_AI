@@ -235,9 +235,243 @@ static SemaphoreHandle_t wifi_mtx = NULL;
 static Preferences prefs;
 static volatile int ai_volume = 80; // Volume de 0 a 100% (padrão 80%)
 
+enum { AI_IDLE = 0, AI_LISTENING, AI_THINKING, AI_SPEAKING, AI_DONE };
+static volatile int ai_state = AI_IDLE;
+static volatile bool ai_rec = false;
+static volatile uint32_t ai_rec_ms = 0;
+static char ai_text[1024] = "";
+static volatile bool ai_dirty = true;
+static portMUX_TYPE ai_mux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t ai_task_handle = NULL;
+
+static void ai_set(int state, const char *text) {
+    portENTER_CRITICAL(&ai_mux);
+    if (text) {
+        strlcpy(ai_text, text, sizeof(ai_text));
+        ai_dirty = true;
+    }
+    ai_state = state;
+    portEXIT_CRITICAL(&ai_mux);
+}
+
+// Certificados raiz da Google Trust Services para validação SSL/TLS estrita (GTS Root R1 e GTS Root R4)
+static const char GOOGLE_ROOT_CAS[] PROGMEM =
+"-----BEGIN CERTIFICATE-----\n"
+"MIIFVzCCAz+gAwIBAgINAgPlk28xsBNJiGuiFzANBgkqhkiG9w0BAQwFADBHMQsw\n"
+"CQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEU\n"
+"MBIGA1UEAxMLR1RTIFJvb3QgUjEwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAw\n"
+"MDAwWjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZp\n"
+"Y2VzIExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjEwggIiMA0GCSqGSIb3DQEBAQUA\n"
+"A4ICDwAwggIKAoICAQC2EQKLHuOhd5s73L+UPreVp0A8of2C+X0yBoJx9vaMf/vo\n"
+"27xqLpeXo4xL+Sv2sfnOhB2x+cWX3u+58qPpvBKJXqeqUqv4IyfLpLGcY9vXmX7w\n"
+"Cl7raKb0xlpHDU0QM+NOsROjyBhsS+z8CZDfnWQpJSMHobTSPS5g4M/SCYe7zUjw\n"
+"TcLCeoiKu7rPWRnWr4+wB7CeMfGCwcDfLqZtbBkOtdh+JhpFAz2weaSUKK0Pfybl\n"
+"qAj+lug8aJRT7oM6iCsVlgmy4HqMLnXWnOunVmSPlk9orj2XwoSPwLxAwAtcvfaH\n"
+"szVsrBhQf4TgTM2S0yDpM7xSma8ytSmzJSq0SPly4cpk9+aCEI3oncKKiPo4Zor8\n"
+"Y/kB+Xj9e1x3+naH+uzfsQ55lVe0vSbv1gHR6xYKu44LtcXFilWr06zqkUspzBmk\n"
+"MiVOKvFlRNACzqrOSbTqn3yDsEB750Orp2yjj32JgfpMpf/VjsPOS+C12LOORc92\n"
+"wO1AK/1TD7Cn1TsNsYqiA94xrcx36m97PtbfkSIS5r762DL8EGMUUXLeXdYWk70p\n"
+"aDPvOmbsB4om3xPXV2V4J95eSRQAogB/mqghtqmxlbCluQ0WEdrHbEg8QOB+DVrN\n"
+"VjzRlwW5y0vtOUucxD/SVRNuJLDWcfr0wbrM7Rv1/oFB2ACYPTrIrnqYNxgFlQID\n"
+"AQABo0IwQDAOBgNVHQ8BAf8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4E\n"
+"FgQU5K8rJnEaK0gnhS9SZizv8IkTcT4wDQYJKoZIhvcNAQEMBQADggIBAJ+qQibb\n"
+"C5u+/x6Wki4+omVKapi6Ist9wTrYggoGxval3sBOh2Z5ofmmWJyq+bXmYOfg6LEe\n"
+"QkEzCzc9zolwFcq1JKjPa7XSQCGYzyI0zzvFIoTgxQ6KfF2I5DUkzps+GlQebtuy\n"
+"h6f88/qBVRRiClmpIgUxPoLW7ttXNLwzldMXG+gnoot7TiYaelpkttGsN/H9oPM4\n"
+"7HLwEXWdyzRSjeZ2axfG34arJ45JK3VmgRAhpuo+9K4l/3wV3s6MJT/KYnAK9y8J\n"
+"ZgfIPxz88NtFMN9iiMG1D53Dn0reWVlHxYciNuaCp+0KueIHoI17eko8cdLiA6Ef\n"
+"MgfdG+RCzgwARWGAtQsgWSl4vflVy2PFPEz0tv/bal8xa5meLMFrUKTX5hgUvYU/\n"
+"Z6tGn6D/Qqc6f1zLXbBwHSs09dR2CQzreExZBfMzQsNhFRAbd03OIozUhfJFfbdT\n"
+"6u9AWpQKXCBfTkBdYiJ23//OYb2MI3jSNwLgjt7RETeJ9r/tSQdirpLsQBqvFAnZ\n"
+"0E6yove+7u7Y/9waLd64NnHi/Hm3lCXRSHNboTXns5lndcEZOitHTtNCjv0xyBZm\n"
+"2tIMPNuzjsmhDYAPexZ3FL//2wmUspO8IFgV6dtxQ/PeEMMA3KgqlbbC1j+Qa3bb\n"
+"bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c\n"
+"-----END CERTIFICATE-----\n"
+"-----BEGIN CERTIFICATE-----\n"
+"MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD\n"
+"VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
+"A1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAATzdHOnaItg\n"
+"rkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzuhXyiQHY7qca4R9gq\n"
+"55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/lxKvRHYqjQjBAMA4G\n"
+"A1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBSATNbrdP9J\n"
+"NqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNpADBmAjEA6ED/g94D9J+uHXqnLrmv\n"
+"T/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8p/SgguMh1YQd\n"
+"c4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD\n"
+"-----END CERTIFICATE-----\n";
+
+// Validação TLS estrita usando o bundle Mozilla de CAs embutido no firmware (inclui GTS Root R1/R4 e GlobalSign)
+static void google_tls(WiFiClientSecure &c) {
+    c.useBuiltinCACertBundle();
+}
+
 // -----------------------------------------------------------------------------
-// Memória Persistente do Agente (fatos, preferências e perfil do usuário na NVS)
+// Google Agenda OAuth2 Device Flow & Calendar API v3 (100% Standalone)
 // -----------------------------------------------------------------------------
+#ifndef GOOGLE_CLIENT_ID
+#define GOOGLE_CLIENT_ID ""
+#endif
+#ifndef GOOGLE_CLIENT_SECRET
+#define GOOGLE_CLIENT_SECRET ""
+#endif
+#ifndef GOOGLE_REFRESH_TOKEN
+#define GOOGLE_REFRESH_TOKEN ""
+#endif
+
+static String gcal_refresh_token = "";
+static String gcal_access_token = "";
+static uint32_t gcal_token_expires_at = 0;
+
+static String get_now_formatted() {
+    time_t now = time(nullptr);
+    struct tm t;
+    localtime_r(&now, &t);
+    char buf[64];
+    if (t.tm_year < 120) { // Antes de 2020: relógio ainda não sincronizou
+        return "Relogio ainda nao sincronizado via NTP.";
+    }
+    const char *dias[] = {"Domingo", "Segunda-feira", "Terca-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sabado"};
+    snprintf(buf, sizeof(buf), "%s, %02d/%02d/%04d %02d:%02d:%02d (Horario de Brasilia UTC-3)",
+             dias[t.tm_wday], t.tm_mday, t.tm_mon + 1, t.tm_year + 1900, t.tm_hour, t.tm_min, t.tm_sec);
+    return String(buf);
+}
+
+static void gcal_load_token() {
+    // O refresh_token vem do .env (gerado por scripts/google_auth.py); a Flash e usada como alternativa
+    gcal_refresh_token = String(GOOGLE_REFRESH_TOKEN);
+    if (gcal_refresh_token.length() == 0) gcal_refresh_token = prefs.getString("gcal_refresh", "");
+    if (gcal_refresh_token.length() > 0) {
+        Serial.printf("[GCAL] Refresh Token carregado da Flash NVS (%u bytes)\n", gcal_refresh_token.length());
+    } else {
+        Serial.println("[GCAL] Nenhum Refresh Token salvo na Flash. Agenda nao vinculada.");
+    }
+}
+
+static bool gcal_refresh_access_token() {
+    if (gcal_refresh_token.length() == 0 || strlen(GOOGLE_CLIENT_ID) == 0 || strlen(GOOGLE_CLIENT_SECRET) == 0) {
+        return false;
+    }
+    if (gcal_access_token.length() > 0 && millis() < gcal_token_expires_at) {
+        return true; // Token atual ainda é válido
+    }
+
+    WiFiClientSecure client;
+    google_tls(client);
+    HTTPClient http;
+    http.setTimeout(15000);
+    http.begin(client, "https://oauth2.googleapis.com/token");
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+    String body = "client_id=" + String(GOOGLE_CLIENT_ID) +
+                  "&client_secret=" + String(GOOGLE_CLIENT_SECRET) +
+                  "&refresh_token=" + gcal_refresh_token +
+                  "&grant_type=refresh_token";
+
+    int code = http.POST(body);
+    if (code == 200) {
+        String resp = http.getString();
+        JsonDocument doc;
+        if (!deserializeJson(doc, resp)) {
+            gcal_access_token = doc["access_token"].as<String>();
+            int exp = doc["expires_in"] | 3600;
+            gcal_token_expires_at = millis() + (exp - 120) * 1000UL;
+            Serial.println("[GCAL] Access token renovado com sucesso!");
+            http.end();
+            return true;
+        }
+    }
+    Serial.printf("[GCAL] Erro ao renovar access token: HTTP %d\n", code);
+    http.end();
+    return false;
+}
+
+// O fluxo de dispositivo do Google nao permite o escopo da Agenda: o pareamento e feito no PC
+// com scripts/google_auth.py, que grava GOOGLE_REFRESH_TOKEN no .env.
+static bool gcal_start_device_auth() {
+    if (gcal_refresh_token.length() > 0) {
+        ai_set(AI_DONE, "A agenda ja esta vinculada.");
+    } else {
+        ai_set(AI_DONE, "Para vincular: no PC rode scripts/google_auth.py e regrave o firmware.");
+    }
+    return false;
+}
+
+// Consulta compromissos na Google Calendar API v3
+static String gcal_list_events(const char *time_min, const char *time_max) {
+    if (!gcal_refresh_access_token()) {
+        return "Agenda nao conectada. Diga 'conectar agenda' para vincular sua conta.";
+    }
+
+    WiFiClientSecure client;
+    google_tls(client);
+    HTTPClient http;
+    http.setTimeout(20000);
+
+    String url = "https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=10";
+    if (time_min && strlen(time_min) > 0) url += "&timeMin=" + String(time_min);
+    if (time_max && strlen(time_max) > 0) url += "&timeMax=" + String(time_max);
+
+    http.begin(client, url);
+    http.addHeader("Authorization", "Bearer " + gcal_access_token);
+
+    int code = http.GET();
+    if (code != 200) {
+        http.end();
+        return "Erro ao consultar a Google Agenda (codigo " + String(code) + ").";
+    }
+
+    String resp = http.getString();
+    http.end();
+
+    JsonDocument doc;
+    if (deserializeJson(doc, resp)) return "Erro ao processar dados da agenda.";
+
+    JsonArray items = doc["items"].as<JsonArray>();
+    if (items.size() == 0) return "Nenhum compromisso encontrado nesse periodo.";
+
+    String result = "Compromissos encontrados:\\n";
+    for (JsonObject it : items) {
+        const char *summary = it["summary"] | "Sem titulo";
+        const char *start_dt = it["start"]["dateTime"] | (it["start"]["date"] | "");
+        result += "- ";
+        result += summary;
+        if (strlen(start_dt) >= 16) {
+            // Extrai hora: HH:MM
+            result += " as " + String(start_dt).substring(11, 16);
+        }
+        result += "\\n";
+    }
+    return result;
+}
+
+// Cria um novo compromisso na Google Calendar API v3
+static String gcal_create_event(const char *summary, const char *start_iso, const char *end_iso) {
+    if (!gcal_refresh_access_token()) {
+        return "Agenda nao conectada. Diga 'conectar agenda' para vincular sua conta.";
+    }
+
+    WiFiClientSecure client;
+    google_tls(client);
+    HTTPClient http;
+    http.setTimeout(20000);
+    http.begin(client, "https://www.googleapis.com/calendar/v3/calendars/primary/events");
+    http.addHeader("Authorization", "Bearer " + gcal_access_token);
+    http.addHeader("Content-Type", "application/json");
+
+    JsonDocument req;
+    req["summary"] = summary;
+    req["start"]["dateTime"] = start_iso;
+    req["end"]["dateTime"] = end_iso;
+    String body;
+    serializeJson(req, body);
+
+    int code = http.POST(body);
+    http.end();
+
+    if (code == 200 || code == 201) {
+        return "Compromisso '" + String(summary) + "' agendado com sucesso na sua Google Agenda!";
+    }
+    return "Erro ao criar compromisso (codigo " + String(code) + ").";
+}
 #define MAX_MEM_FACTS 10
 #define MAX_MEM_LEN   120
 static String ai_memories[MAX_MEM_FACTS];
@@ -306,15 +540,6 @@ static String mem_build_prompt() {
     }
     return s;
 }
-
-enum { AI_IDLE = 0, AI_LISTENING, AI_THINKING, AI_SPEAKING, AI_DONE };
-static volatile int ai_state = AI_IDLE;
-static volatile bool ai_rec = false;
-static volatile uint32_t ai_rec_ms = 0;
-static char ai_text[1024] = "";
-static volatile bool ai_dirty = true;
-static portMUX_TYPE ai_mux = portMUX_INITIALIZER_UNLOCKED;
-static TaskHandle_t ai_task_handle = NULL;
 
 static bool es7210_w(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(ES7210_ADDR);
@@ -406,16 +631,6 @@ static void init_audio() {
     Serial.println("[MIC] ES7210 OK");
 }
 
-static void ai_set(int state, const char *text) {
-    portENTER_CRITICAL(&ai_mux);
-    if (text) {
-        strlcpy(ai_text, text, sizeof(ai_text));
-        ai_dirty = true;
-    }
-    ai_state = state;
-    portEXIT_CRITICAL(&ai_mux);
-}
-
 // A fonte padrão só tem ASCII: converte acentos do UTF-8 e descarta o resto
 static void to_ascii(const char *src, char *dst, size_t dst_len) {
     static const char *map_c3 = "AAAAAAACEEEEIIIIDNOOOOOxOUUUUYTsaaaaaaaceeeeiiiidnooooo/ouuuuyty";
@@ -438,64 +653,66 @@ static void to_ascii(const char *src, char *dst, size_t dst_len) {
     dst[o] = 0;
 }
 
-// Certificados raiz da Google Trust Services para validação SSL/TLS estrita (GTS Root R1 e GTS Root R4)
-static const char GOOGLE_ROOT_CAS[] PROGMEM =
-"-----BEGIN CERTIFICATE-----\n"
-"MIIFVzCCAz+gAwIBAgINAgPlk28xsBNJiGuiFzANBgkqhkiG9w0BAQwFADBHMQsw\n"
-"CQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEU\n"
-"MBIGA1UEAxMLR1RTIFJvb3QgUjEwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAw\n"
-"MDAwWjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZp\n"
-"Y2VzIExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjEwggIiMA0GCSqGSIb3DQEBAQUA\n"
-"A4ICDwAwggIKAoICAQC2EQKLHuOhd5s73L+UPreVp0A8of2C+X0yBoJx9vaMf/vo\n"
-"27xqLpeXo4xL+Sv2sfnOhB2x+cWX3u+58qPpvBKJXqeqUqv4IyfLpLGcY9vXmX7w\n"
-"Cl7raKb0xlpHDU0QM+NOsROjyBhsS+z8CZDfnWQpJSMHobTSPS5g4M/SCYe7zUjw\n"
-"TcLCeoiKu7rPWRnWr4+wB7CeMfGCwcDfLqZtbBkOtdh+JhpFAz2weaSUKK0Pfybl\n"
-"qAj+lug8aJRT7oM6iCsVlgmy4HqMLnXWnOunVmSPlk9orj2XwoSPwLxAwAtcvfaH\n"
-"szVsrBhQf4TgTM2S0yDpM7xSma8ytSmzJSq0SPly4cpk9+aCEI3oncKKiPo4Zor8\n"
-"Y/kB+Xj9e1x3+naH+uzfsQ55lVe0vSbv1gHR6xYKu44LtcXFilWr06zqkUspzBmk\n"
-"MiVOKvFlRNACzqrOSbTqn3yDsEB750Orp2yjj32JgfpMpf/VjsPOS+C12LOORc92\n"
-"wO1AK/1TD7Cn1TsNsYqiA94xrcx36m97PtbfkSIS5r762DL8EGMUUXLeXdYWk70p\n"
-"aDPvOmbsB4om3xPXV2V4J95eSRQAogB/mqghtqmxlbCluQ0WEdrHbEg8QOB+DVrN\n"
-"VjzRlwW5y0vtOUucxD/SVRNuJLDWcfr0wbrM7Rv1/oFB2ACYPTrIrnqYNxgFlQID\n"
-"AQABo0IwQDAOBgNVHQ8BAf8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4E\n"
-"FgQU5K8rJnEaK0gnhS9SZizv8IkTcT4wDQYJKoZIhvcNAQEMBQADggIBAJ+qQibb\n"
-"C5u+/x6Wki4+omVKapi6Ist9wTrYggoGxval3sBOh2Z5ofmmWJyq+bXmYOfg6LEe\n"
-"QkEzCzc9zolwFcq1JKjPa7XSQCGYzyI0zzvFIoTgxQ6KfF2I5DUkzps+GlQebtuy\n"
-"h6f88/qBVRRiClmpIgUxPoLW7ttXNLwzldMXG+gnoot7TiYaelpkttGsN/H9oPM4\n"
-"7HLwEXWdyzRSjeZ2axfG34arJ45JK3VmgRAhpuo+9K4l/3wV3s6MJT/KYnAK9y8J\n"
-"ZgfIPxz88NtFMN9iiMG1D53Dn0reWVlHxYciNuaCp+0KueIHoI17eko8cdLiA6Ef\n"
-"MgfdG+RCzgwARWGAtQsgWSl4vflVy2PFPEz0tv/bal8xa5meLMFrUKTX5hgUvYU/\n"
-"Z6tGn6D/Qqc6f1zLXbBwHSs09dR2CQzreExZBfMzQsNhFRAbd03OIozUhfJFfbdT\n"
-"6u9AWpQKXCBfTkBdYiJ23//OYb2MI3jSNwLgjt7RETeJ9r/tSQdirpLsQBqvFAnZ\n"
-"0E6yove+7u7Y/9waLd64NnHi/Hm3lCXRSHNboTXns5lndcEZOitHTtNCjv0xyBZm\n"
-"2tIMPNuzjsmhDYAPexZ3FL//2wmUspO8IFgV6dtxQ/PeEMMA3KgqlbbC1j+Qa3bb\n"
-"bP6MvPJwNQzcmRk13NfIRmPVNnGuV/u3gm3c\n"
-"-----END CERTIFICATE-----\n"
-"-----BEGIN CERTIFICATE-----\n"
-"MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD\n"
-"VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n"
-"A1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAATzdHOnaItg\n"
-"rkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzuhXyiQHY7qca4R9gq\n"
-"55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/lxKvRHYqjQjBAMA4G\n"
-"A1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBSATNbrdP9J\n"
-"NqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNpADBmAjEA6ED/g94D9J+uHXqnLrmv\n"
-"T/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8p/SgguMh1YQd\n"
-"c4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD\n"
-"-----END CERTIFICATE-----\n";
+// Sincroniza o relógio via NTP (essencial para validar certificados TLS). Retorna true se o relógio é válido.
+static bool ntp_sync(uint32_t timeout_ms) {
+    static bool sntp_inited = false;
+    if (!sntp_inited) {
+        configTzTime("<-03>3", "pool.ntp.org", "time.google.com", "a.st1.ntp.br");
+        sntp_inited = true;
+    }
+    uint32_t start = millis();
+    time_t now = time(nullptr);
+    while (now < 1700000000 && millis() - start < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        now = time(nullptr);
+    }
+    bool ok = now >= 1700000000;
+    Serial.printf("[NTP] %s | epoch=%ld | %u ms\n", ok ? "Relogio sincronizado" : "FALHA ao sincronizar", (long)now, (unsigned)(millis() - start));
+    return ok;
+}
 
 static bool ai_wifi_up() {
-    if (WiFi.status() == WL_CONNECTED) return true;
+    if (WiFi.status() == WL_CONNECTED) {
+        if (time(nullptr) < 1700000000) ntp_sync(10000);
+        return true;
+    }
     WiFi.persistent(false);       // NUNCA grava a senha do Wi-Fi na memória Flash NVS
     WiFi.setAutoReconnect(false); // Evita tentativas de reconexão automáticas em background
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
     for (int i = 0; i < 40 && WiFi.status() != WL_CONNECTED; i++) vTaskDelay(pdMS_TO_TICKS(400));
-    return WiFi.status() == WL_CONNECTED;
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WIFI] Falha ao conectar");
+        return false;
+    }
+    Serial.printf("[WIFI] Conectado, IP %s\n", WiFi.localIP().toString().c_str());
+    // Sempre sincroniza o relógio logo após conectar (necessário para o handshake TLS)
+    if (time(nullptr) < 1700000000) ntp_sync(15000);
+    return true;
 }
 
 static void ai_wifi_down() {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+}
+
+// Na inicialização: conecta ao Wi-Fi, atualiza o relógio via NTP, testa o TLS com o Gemini e desliga o rádio
+static void boot_net_task(void *arg) {
+    if (xSemaphoreTake(wifi_mtx, pdMS_TO_TICKS(60000)) == pdTRUE) {
+        if (ai_wifi_up()) {
+            WiFiClientSecure c;
+            google_tls(c);
+            c.setTimeout(10);
+            bool ok = c.connect("generativelanguage.googleapis.com", 443);
+            char err[100] = "";
+            if (!ok) c.lastError(err, sizeof(err));
+            Serial.printf("[BOOT-NET] Teste TLS Gemini: %s %s | epoch=%ld\n", ok ? "OK" : "FALHOU", err, (long)time(nullptr));
+            c.stop();
+        }
+        ai_wifi_down();
+        xSemaphoreGive(wifi_mtx);
+    }
+    vTaskDelete(NULL);
 }
 
 static void ai_put_le(uint8_t *p, uint32_t v, int n) {
@@ -531,7 +748,7 @@ static uint8_t *ai_tts_fetch(const char *text, size_t *out_bytes) {
     size_t n = 0;
 
     WiFiClientSecure client;
-    client.setCACert(GOOGLE_ROOT_CAS);
+    google_tls(client);
     HTTPClient http;
     http.useHTTP10(true);  // sem chunked: o corpo pode ser lido direto do stream
     http.setTimeout(45000);
@@ -614,16 +831,25 @@ static void ai_play_pcm24(const int16_t *in, size_t n) {
 }
 
 static void ai_query(int16_t *pcm, size_t n) {
-    // Monta o prompt do sistema injetando dinamicamente as memórias salvas na Flash
+    // Monta o prompt do sistema injetando dinamicamente a data/hora oficial, memórias e ferramentas da agenda
     String prompt_text =
-        "Voce e um robo assistente de voz inteligente em um display de mesa com memoria persistente. "
+        "Voce e um robo assistente de voz inteligente em um display de mesa com memoria persistente e integracao com a Google Agenda. "
         "Responda em portugues do Brasil ao que foi dito no audio, em no maximo 3 frases curtas "
-        "(ate 160 caracteres), sem markdown e sem emojis.\\n\\n"
-        "[FATOS QUE VOCE LEMBRA (SEU NOME, DO USUARIO, PREFERENCIAS E AMBIENTE)]:\\n" + mem_build_prompt() + "\\n\\n"
+        "(ate 160 caracteres), sem markdown e sem emojis. "
+        "[DATA E HORA ATUAL]: " + get_now_formatted() + ". "
+        "[FATOS QUE VOCE LEMBRA (SEU NOME, DO USUARIO, PREFERENCIAS E AMBIENTE)]: " + mem_build_prompt() + ". "
         "SE a mensagem do usuario trouxer algum fato novo importante (como seu nome proprio de robo, o nome dele, gostos, rotina, cidade ou algo para lembrar), "
-        "ao final da sua resposta, em uma linha separada, adicione exatamente:\\n"
-        "MEMORIA: <fato curto e claro a ser salvo>\\n"
-        "(Exemplos: MEMORIA: O meu nome e robotAI | MEMORIA: O nome do usuario e Cleber)";
+        "ao final da sua resposta, adicione exatamente: MEMORIA: <fato curto e claro a ser salvo>. "
+        "FERRAMENTAS DA GOOGLE AGENDA: "
+        "- Se o usuario pedir para conectar ou vincular a agenda, responda apenas: GCAL_AUTH "
+        "- Se o usuario perguntar sobre compromissos ou eventos da agenda, responda apenas: "
+        "GCAL_LIST: <data/hora inicio RFC3339> | <data/hora fim RFC3339> "
+        "- Se o usuario pedir para marcar ou agendar um compromisso, responda apenas: "
+        "GCAL_ADD: <titulo> | <inicio RFC3339> | <fim RFC3339>";
+
+    prompt_text.replace("\"", "\\\"");
+    prompt_text.replace("\n", " ");
+    prompt_text.replace("\r", "");
 
     String prefix = "{\"contents\":[{\"parts\":[{\"text\":\"" + prompt_text + "\"},{\"inline_data\":{\"mime_type\":\"audio/wav\",\"data\":\"";
     static const char suffix[] = "\"}}]}]}";
@@ -678,17 +904,26 @@ static void ai_query(int16_t *pcm, size_t n) {
     int code;
     {
         WiFiClientSecure client;
-        client.setCACert(GOOGLE_ROOT_CAS);
+        google_tls(client);
         HTTPClient http;
         http.setTimeout(45000);
         http.begin(client, String("https://generativelanguage.googleapis.com/v1beta/models/") + GEMINI_MODEL + ":generateContent");
         http.addHeader("Content-Type", "application/json");
         http.addHeader("x-goog-api-key", GEMINI_API_KEY);
-        for (int attempt = 0; attempt < 3; attempt++) {
+        for (int attempt = 0; attempt < 4; attempt++) {
             code = http.POST((uint8_t *)body, body_len);
-            if (code > 0) resp = http.getString();
-            if (code != 503) break;
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            if (code > 0) {
+                resp = http.getString();
+                // 503/500 = modelo temporariamente sobrecarregado: tenta de novo com espera crescente
+                if (code != 503 && code != 500) break;
+                Serial.printf("[AI] HTTP %d (sobrecarga temporaria), tentativa %d/4\n", code, attempt + 1);
+                vTaskDelay(pdMS_TO_TICKS(2000 * (attempt + 1)));
+                continue;
+            }
+            char err_buf[64];
+            client.lastError(err_buf, sizeof(err_buf));
+            Serial.printf("[HTTP-ERR] Tentativa %d falhou: HTTP %d | TLS erro: %s\n", attempt, code, err_buf);
+            vTaskDelay(pdMS_TO_TICKS(1500));
         }
         http.end();
     }
@@ -715,24 +950,53 @@ static void ai_query(int16_t *pcm, size_t n) {
     }
     Serial.printf("[AI] HTTP %d: %s\n", code, raw);
 
-    // Se o modelo aprendeu e enviou uma tag "MEMORIA:", extrai e salva na Flash NVS
     char speech_text[1024];
     strlcpy(speech_text, raw, sizeof(speech_text));
-    char *mem_tag = strstr(speech_text, "MEMORIA:");
-    if (!mem_tag) mem_tag = strstr(speech_text, "memoria:");
-    if (mem_tag) {
-        char *fact_str = mem_tag + 8;
-        while (*fact_str == ' ' || *fact_str == '\t') fact_str++;
-        // Corta na quebra de linha seguinte
-        char *nl = strchr(fact_str, '\n');
-        if (nl) *nl = 0;
-        mem_learn(fact_str);
-        // Remove a linha da tag MEMORIA do áudio que o robô vai falar e do balão na tela
-        *mem_tag = 0;
-        // Limpa espaços ou quebras extras no fim da fala
-        int sl = strlen(speech_text);
-        while (sl > 0 && (speech_text[sl - 1] == ' ' || speech_text[sl - 1] == '\n' || speech_text[sl - 1] == '\r')) {
-            speech_text[--sl] = 0;
+
+    // Trata intenções da Google Agenda detectadas pelo Gemini
+    if (strstr(raw, "GCAL_AUTH")) {
+        gcal_start_device_auth();
+        ai_wifi_down();
+        xSemaphoreGive(wifi_mtx);
+        return;
+    } else if (strstr(raw, "GCAL_LIST:")) {
+        char *p = strstr(raw, "GCAL_LIST:") + 10;
+        while (*p == ' ') p++;
+        char *sep = strchr(p, '|');
+        String t_min = "", t_max = "";
+        if (sep) {
+            *sep = 0;
+            char *p2 = sep + 1;
+            while (*p2 == ' ') p2++;
+            char *nl = strchr(p2, '\n'); if (nl) *nl = 0;
+            t_min = String(p); t_min.trim();
+            t_max = String(p2); t_max.trim();
+        } else {
+            char *nl = strchr(p, '\n'); if (nl) *nl = 0;
+            t_min = String(p); t_min.trim();
+        }
+        String g_res = gcal_list_events(t_min.c_str(), t_max.c_str());
+        strlcpy(speech_text, g_res.c_str(), sizeof(speech_text));
+    } else if (strstr(raw, "GCAL_ADD:")) {
+        char *p = strstr(raw, "GCAL_ADD:") + 9;
+        while (*p == ' ') p++;
+        char *sep1 = strchr(p, '|');
+        if (sep1) {
+            *sep1 = 0;
+            char *p2 = sep1 + 1;
+            while (*p2 == ' ') p2++;
+            char *sep2 = strchr(p2, '|');
+            if (sep2) {
+                *sep2 = 0;
+                char *p3 = sep2 + 1;
+                while (*p3 == ' ') p3++;
+                char *nl = strchr(p3, '\n'); if (nl) *nl = 0;
+                String title = String(p); title.trim();
+                String st = String(p2); st.trim();
+                String en = String(p3); en.trim();
+                String g_res = gcal_create_event(title.c_str(), st.c_str(), en.c_str());
+                strlcpy(speech_text, g_res.c_str(), sizeof(speech_text));
+            }
         }
     }
 
@@ -1355,8 +1619,10 @@ void setup() {
     wifi_mtx = xSemaphoreCreateMutex();
     init_volume_buttons();
     mem_load(); // Carrega os fatos aprendidos salvos na Flash NVS
+    gcal_load_token(); // Carrega o refresh_token da Google Agenda se já emparelhado
     init_audio();
     xTaskCreatePinnedToCore(ai_task, "AI_Task", 20480, NULL, 1, &ai_task_handle, 0);
+    xTaskCreatePinnedToCore(boot_net_task, "BootNet", 12288, NULL, 1, NULL, 0);
 
     // 6. Construir a interface do Agente de IA na tela principal
     build_ai_ui(lv_scr_act());

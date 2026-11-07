@@ -11,6 +11,9 @@ ALLOWED_KEYS = {
     "GEMINI_API_KEY",
     "GEMINI_MODEL",
     "GEMINI_TTS_MODEL",
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REFRESH_TOKEN",
 }
 
 env_file = os.path.join(env.get("PROJECT_DIR"), ".env")

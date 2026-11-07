@@ -17,6 +17,10 @@ O sistema comunica-se diretamente com as APIs do **Google Gemini** (`gemini-3.5-
 - **Interação Natural por Toque (*Hold-to-Talk*)**:
   - Segure o dedo em qualquer ponto da tela AMOLED para falar.
   - Ao soltar, o dispositivo envia o áudio, aguarda a resposta do modelo e sintetiza a fala com animação correspondente.
+- **Integração com Google Calendar (100% Standalone)**:
+  - Consulta e criação de compromissos na sua agenda Google diretamente por voz.
+  - Sincronização automática do relógio do sistema via NTP no fuso de Brasília (UTC-3) a cada conexão à internet.
+  - O ESP32-S3 renova seu próprio token OAuth2 diretamente com `https://oauth2.googleapis.com/token` usando o bundle CA embutido do ESP-IDF.
 - **Memória Persistente Autônoma (NVS Flash)**:
   - O robô possui memória de longo prazo persistente na Flash do ESP32-S3 (não se perde ao desligar ou reiniciar).
   - Ele detecta e extrai automaticamente informações importantes sobre você (como seu nome, gostos, cidade, rotina ou preferências) e as salva na NVS.
@@ -80,11 +84,27 @@ GEMINI_API_KEY=AIzaSy...
 # Modelos do Gemini
 GEMINI_MODEL=gemini-3.5-flash-lite
 GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview
+
+# Integração Google Calendar (Opcional)
+GOOGLE_CLIENT_ID=seu_client_id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=seu_client_secret
+GOOGLE_REFRESH_TOKEN=seu_refresh_token
 ```
+
+### 3. Obter o Refresh Token do Google Calendar (Fluxo Único)
+
+1. Crie credenciais OAuth 2.0 do tipo **Aplicativo para Computador** (Desktop App) no [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
+2. Ative a **Google Calendar API** no seu projeto Google Cloud.
+3. Insira o `GOOGLE_CLIENT_ID` e `GOOGLE_CLIENT_SECRET` no seu arquivo `.env`.
+4. Execute o script de autorização local:
+   ```bash
+   python3 scripts/google_auth.py
+   ```
+5. Faça login com sua conta Google na janela do navegador que se abrirá e autorize o escopo do Google Calendar. O script salvará o `GOOGLE_REFRESH_TOKEN` automaticamente no `.env`.
 
 > 🔒 **Segurança**: O arquivo `.env` possui permissão restrita (`0600`) e está incluído no `.gitignore`. Suas credenciais nunca serão enviadas ao GitHub.
 
-### 3. Compilação e Gravação
+### 4. Compilação e Gravação
 
 No terminal, na pasta raiz do projeto:
 
